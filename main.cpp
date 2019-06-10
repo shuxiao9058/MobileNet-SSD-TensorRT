@@ -103,77 +103,125 @@ int main(int argc, char *argv[])
 {
     std::vector<std::string> output_vector = {OUTPUT_BLOB_NAME};
     TensorNet tensorNet;
-    tensorNet.LoadNetwork(model,weight,INPUT_BLOB_NAME, output_vector,BATCH_SIZE);
+    tensorNet.LoadNetwork(model, weight, INPUT_BLOB_NAME, output_vector, BATCH_SIZE);
 
     DimsCHW dimsData = tensorNet.getTensorDims(INPUT_BLOB_NAME);
-    DimsCHW dimsOut  = tensorNet.getTensorDims(OUTPUT_BLOB_NAME);
+    DimsCHW dimsOut = tensorNet.getTensorDims(OUTPUT_BLOB_NAME);
 
-    float* data    = allocateMemory( dimsData , (char*)"input blob");
+    float *data = allocateMemory(dimsData, (char *)"input blob");
     std::cout << "allocate data" << std::endl;
-    float* output  = allocateMemory( dimsOut  , (char*)"output blob");
+    float *output = allocateMemory(dimsOut, (char *)"output blob");
     std::cout << "allocate output" << std::endl;
     int height = 300;
-    int width  = 300;
+    int width = 300;
 
-    cv::Mat frame,srcImg;
+    cv::Mat frame, srcImg;
 
-    void* imgCPU;
-    void* imgCUDA;
+    void *imgCPU;
+    void *imgCUDA;
     Timer timer;
 
-//    std::string imgFile = "../../testPic/test.jpg";
-//    frame = cv::imread(imgFile);
+    //    std::string imgFile = "../../testPic/test.jpg";
+    //    frame = cv::imread(imgFile);
     std::thread readTread(readPicture);
     readTread.detach();
-    while(1){
-    imageBuffer->consume(frame);
 
-    srcImg = frame.clone();
-    cv::resize(frame, frame, cv::Size(300,300));
-    const size_t size = width * height * sizeof(float3);
+    int failCount = 0;
+    int frameCount = 0;
 
-    if( CUDA_FAILED( cudaMalloc( &imgCUDA, size)) )
+    float sumSecs = 0.0;
+    int sumImgs = 0;
+    int emptyFrameCount = 0;
+    //    int64 start=0,end=0;
+
+    while (1)
     {
-        cout <<"Cuda Memory allocation error occured."<<endl;
-        return false;
-    }
+        imageBuffer->consume(frame);
 
-    void* imgData = malloc(size);
-    memset(imgData,0,size);
-
-    loadImg(frame,height,width,(float*)imgData,make_float3(127.5,127.5,127.5),0.007843);
-    cudaMemcpyAsync(imgCUDA,imgData,size,cudaMemcpyHostToDevice);
-
-    void* buffers[] = { imgCUDA, output };
-
-    timer.tic();
-    tensorNet.imageInference( buffers, output_vector.size() + 1, BATCH_SIZE);
-    timer.toc();
-    double msTime = timer.t;
-
-    vector<vector<float> > detections;
-
-    for (int k=0; k<100; k++)
-    {
-        if(output[7*k+1] == -1)
+        if (frame.empty())
+        {
+            if (failCount <= 10)
+            {
+                failCount++;
+                continue;
+            }
             break;
-        float classIndex = output[7*k+1];
-        float confidence = output[7*k+2];
-        float xmin = output[7*k + 3];
-        float ymin = output[7*k + 4];
-        float xmax = output[7*k + 5];
-        float ymax = output[7*k + 6];
-        std::cout << classIndex << " , " << confidence << " , "  << xmin << " , " << ymin<< " , " << xmax<< " , " << ymax << std::endl;
-        int x1 = static_cast<int>(xmin * srcImg.cols);
-        int y1 = static_cast<int>(ymin * srcImg.rows);
-        int x2 = static_cast<int>(xmax * srcImg.cols);
-        int y2 = static_cast<int>(ymax * srcImg.rows);
-        cv::rectangle(srcImg,cv::Rect2f(cv::Point(x1,y1),cv::Point(x2,y2)),cv::Scalar(255,0,255),1);
+        }
 
+        failCount = 0;
+        frameCount++;
+        srcImg = frame.clone();
+
+        // Start timer
+        double cvTimer = (double)cv::getTickCount();
+
+        cv::resize(frame, frame, cv::Size(300, 300));
+        const size_t size = width * height * sizeof(float3);
+
+        if (CUDA_FAILED(cudaMalloc(&imgCUDA, size)))
+        {
+            cout << "Cuda Memory allocation error occured." << endl;
+            return false;
+        }
+
+        void *imgData = malloc(size);
+        memset(imgData, 0, size);
+
+        loadImg(frame, height, width, (float *)imgData, make_float3(127.5, 127.5, 127.5), 0.007843);
+        cudaMemcpyAsync(imgCUDA, imgData, size, cudaMemcpyHostToDevice);
+
+        void *buffers[] = {imgCUDA, output};
+
+        timer.tic();
+        tensorNet.imageInference(buffers, output_vector.size() + 1, BATCH_SIZE);
+        timer.toc();
+        double msTime = timer.t;
+
+        vector<vector<float>> detections;
+
+        for (int k = 0; k < 100; k++)
+        {
+            if (output[7 * k + 1] == -1)
+                break;
+            float classIndex = output[7 * k + 1];
+            float confidence = output[7 * k + 2];
+            float xmin = output[7 * k + 3];
+            float ymin = output[7 * k + 4];
+            float xmax = output[7 * k + 5];
+            float ymax = output[7 * k + 6];
+            //        std::cout << classIndex << " , " << confidence << " , "  << xmin << " , " << ymin<< " , " << xmax<< " , " << ymax << std::endl;
+            int x1 = static_cast<int>(xmin * srcImg.cols);
+            int y1 = static_cast<int>(ymin * srcImg.rows);
+            int x2 = static_cast<int>(xmax * srcImg.cols);
+            int y2 = static_cast<int>(ymax * srcImg.rows);
+            cv::rectangle(srcImg, cv::Rect2f(cv::Point(x1, y1), cv::Point(x2, y2)), cv::Scalar(255, 0, 255), 1);
+        }
+        float fps = cv::getTickFrequency() / ((double)cv::getTickCount() - cvTimer);
+        float secs = ((double)cv::getTickCount() - cvTimer) / cv::getTickFrequency();
+        sumSecs += secs;
+        sumImgs += 1;
+        // Display FPS on frame
+        std::cout << std::fixed << std::setprecision(2)
+                  << "Computing time: " << secs * 1000
+                  << "ms, FPS: " << fps << std::endl;
+
+        //    cv::imshow("mobileNet",srcImg);
+        //   cv::waitKey(40);
+        //    std::string fileName = "./out/" + sprintf
+        std::ostringstream stringStream;
+        stringStream << "./out/" << std::setw(8) << std::setfill('0') << std::fixed << frameCount << ".jpg";
+        std::string copyOfStr = stringStream.str();
+
+        //std::string result = fmt::sprintf("./out/%05d.jpg", frameCount);
+        imwrite(copyOfStr, srcImg);
+
+        free(imgData);
     }
-    cv::imshow("mobileNet",srcImg);
-    cv::waitKey(40);
-    free(imgData);
+
+    if (sumImgs > 0)
+    {
+        std::cout << "AVG Predicted time: " << std::setprecision(5)
+                  << sumSecs / sumImgs * 1000 << "ms, FPS: " << 1 / (sumSecs / sumImgs) << std::endl;
     }
     cudaFree(imgCUDA);
     cudaFreeHost(imgCPU);
